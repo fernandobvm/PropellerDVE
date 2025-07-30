@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+from scipy.interpolate import interp1d
 
 class PropellerSection:
     def __init__(self, r, chord, twist_deg, profile = "NACA 0012", n_points = 50):
@@ -15,11 +16,15 @@ class PropellerSection:
     def generate_coordinates(self):
         if self.profile.upper().startswith("NACA"):
             code = self.profile.split(" ")[1]
-            self.x , self.z = self.generate_naca(code)
+            x , z = self.generate_naca(code)
+            
         elif self.profile.lower() in ["clark y", "clarky", "clark-y"]:
-            self.x, self.z = self.generate_clarky()
+           x, z = self.generate_clarky()
         else:
             raise ValueError(f"Airfoil desconhecido ou formato inválido: '{self.profile}'")
+        self.x = x
+        self.z = np.mean(z) if np.mean(z) > 0.001 else 0 # Aerofólios finos
+        self.z_real = z
  
     def generate_naca(self, code='0012'):
         """
@@ -127,8 +132,7 @@ class PropellerGeometry:
     def get_profiles(self):
         return [s.profile for s in self.sections]
     
-    
-    def plot3d(self):
+    def plot3d(self, real_profile = False):
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='3d')
 
@@ -139,7 +143,10 @@ class PropellerGeometry:
 
             # Escalar pela corda local
             x_scaled = (sec.x - 0.25) * sec.chord  # referência em 1/4 da corda
-            z_scaled = sec.z * sec.chord
+            if real_profile:
+                z_scaled = sec.z_real * sec.chord
+            else:
+                z_scaled = sec.z * sec.chord
 
             # Aplicar torção
             x_rot = x_scaled * np.cos(sec.twist) - z_scaled * np.sin(sec.twist)
@@ -161,8 +168,106 @@ class PropellerGeometry:
         ax.set_xlabel("X (Chord)")
         ax.set_ylabel("Y (Span)")
         ax.set_zlabel("Z")
-        ax.set_title("Propeller Geometry with NACA 0012 Profile")
+        ax.set_title("Propeller Geometry")
         ax.view_init(elev=25, azim=-120)
+        plt.tight_layout()
+        plt.show()
+
+    def discretize2DVE(self, m=5, n=10):
+        """
+        Discretiza a pá em DVEs, utilizando os perfis armazenados nas seções (pré-processados).
+        m -> chordwise
+        n -> spanwise
+        """
+
+        r_vals = np.linspace(self.sections[0].r, self.sections[-1].r, n)
+        profiles = []
+
+        # Criar interpoladores para corda e twist
+        r_sections = [s.r for s in self.sections]
+        chord_interp = interp1d(r_sections, [s.chord for s in self.sections], kind='linear')
+        twist_interp = interp1d(r_sections, [s.twist for s in self.sections], kind='linear')
+
+        # Lista auxiliar com os perfis normalizados
+        x_profiles = [s.x for s in self.sections]
+        z_profiles = [s.z for s in self.sections]
+
+        # Para cada r do span, encontrar perfil mais próximo
+        for r in r_vals:
+            # Seleciona seção mais próxima (você pode usar interpolação de perfil se quiser algo mais avançado)
+            closest_section = min(self.sections, key=lambda s: abs(s.r - r))
+            x2d = closest_section.x
+            z2d = closest_section.z
+
+            chord = chord_interp(r)
+            twist = twist_interp(r)
+
+            # Centraliza em x=0.25, escala e aplica twist
+            x_scaled = (x2d - 0.25) * chord
+            z_scaled = z2d * chord
+            x_rot = x_scaled * np.cos(twist) - z_scaled * np.sin(twist)
+            z_rot = x_scaled * np.sin(twist) + z_scaled * np.cos(twist)
+            y = np.full_like(x_rot, r)
+
+            profile_3d = np.vstack((x_rot, y, z_rot)).T
+            profiles.append(profile_3d)
+
+        # Construção dos DVEs
+        dves = []
+        for j in range(n - 1):      # spanwise
+            for i in range(m):      # chordwise
+                p1 = profiles[j][i]
+                p2 = profiles[j][i+1]
+                p3 = profiles[j+1][i+1]
+                p4 = profiles[j+1][i]
+                dve = DVE(np.array(p1), np.array(p2), np.array(p3), np.array(p4))
+                dves.append(dve)
+
+        self.dves = dves
+
+    def plotDVE(self, figsize=(10, 6), elev=25, azim=-120, plot_normal = False, k_normal = 0.1):
+        """
+        Plota os DVEs em 3D:
+        - Arestas em linhas vermelhas tracejadas
+        - Ponto de controle como ponto vermelho
+        - Vetor normal como seta azul
+        """
+        fig = plt.figure(figsize=figsize)
+        ax = fig.add_subplot(111, projection='3d')
+
+        for dve in self.dves:
+            # Coordenadas das arestas do painel
+            x = [dve.p1[0], dve.p2[0], dve.p3[0], dve.p4[0], dve.p1[0]]
+            y = [dve.p1[1], dve.p2[1], dve.p3[1], dve.p4[1], dve.p1[1]]
+            z = [dve.p1[2], dve.p2[2], dve.p3[2], dve.p4[2], dve.p1[2]]
+
+            # Desenha as arestas do painel
+            ax.plot(x, y, z, 'r--', linewidth=0.8)
+
+            # Ponto de controle (centro do DVE)
+            cx, cy, cz = dve.control_point
+            ax.scatter(cx, cy, cz, color='red', s=10)
+
+            # Vetor normal (azul)
+            # Ajustar escala com base na dimensão local do painel
+            if plot_normal:
+                edge_length = k_normal* (np.linalg.norm(dve.p2 - dve.p1) + np.linalg.norm(dve.p4 - dve.p1))
+                normal_vector = dve.normal * edge_length * 0.5  # ajustar escala
+
+                ax.quiver(
+                    cx, cy, cz,  # origem
+                    normal_vector[0], normal_vector[1], normal_vector[2],  # direção
+                    color='blue', linewidth=1.2, arrow_length_ratio=0.2
+                )
+
+        # Ajustes de visualização
+        ax.set_xlabel("X (Chord)")
+        ax.set_ylabel("Y (Span)")
+        ax.set_zlabel("Z")
+        ax.set_title("Representação 3D dos DVEs")
+        ax.view_init(elev=elev, azim=azim)
+        ax.grid(True)
+        ax.set_box_aspect([1, 2, 0.5])  # aspecto ajustado
         plt.tight_layout()
         plt.show()
 
@@ -184,7 +289,7 @@ class DVE:
         # Vetor normal estimado com produto vetorial das diagonais
         v1 = self.p2 - self.p1
         v2 = self.p4 - self.p1
-        n = np.cross(v1, v2)
+        n = np.cross(v2, v1)
         return n / np.linalg.norm(n)
 
 
