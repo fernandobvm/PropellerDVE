@@ -371,34 +371,37 @@ class DVE:
 
     def compute_sweep_angles(self):
         """
-        Calcula os sweep angles do painel DVE em radianos.
+        Calcula os ângulos de enflechamento (sweep angles) da borda de ataque (LE)
+        e da borda de fuga (TE) em radianos.
+        
+        O ângulo de enflechamento é definido como o ângulo entre a aresta 
+        e o eixo local eta (envergadura).
         """
-        # Leading edge vector: p4 - p1
-        v_le = self.p4 - self.p1
-        # Trailing edge vector: p3 - p2
-        v_te = self.p3 - self.p2
-        # Mid-chord vector: (p3+p4)/2 - (p1+p2)/2
-        v_mc = 0.5 * (self.p3 + self.p4) - 0.5 * (self.p1 + self.p2)
-
-        # Direção da corda: p2 - p1
-        chord_vector = self.p2 - self.p1
-        e_chord = chord_vector / np.linalg.norm(chord_vector)
-
-        # Função auxiliar para calcular o ângulo entre um vetor e a corda no plano (xi, eta)
-        def angle_with_chord(v):
-            proj = v - np.dot(v, e_chord) * e_chord  # componente perpendicular à corda
-            return np.arctan2(np.dot(proj, self.local_axes[1]), np.dot(v, e_chord))
-
         # É necessário que self.local_axes tenha sido computado antes!
         if not hasattr(self, "local_axes"):
             raise ValueError("local_axes devem ser definidos antes de calcular os sweep angles")
 
-        # Leading-edge sweep
-        self.sweep_le = angle_with_chord(v_le)
-        # Trailing-edge sweep
-        self.sweep_te = angle_with_chord(v_te)
-        # Mid-chord sweep
-        self.sweep_mc = angle_with_chord(v_mc)
+        # Vetores das arestas no sistema de coordenadas global
+        v_le_global = self.p4 - self.p1
+        v_te_global = self.p3 - self.p2
+
+        # Projeta os vetores das arestas nos eixos locais xi e eta
+        v_le_xi_comp = np.dot(v_le_global, self.e_xi)
+        v_le_eta_comp = np.dot(v_le_global, self.e_eta)
+        
+        v_te_xi_comp = np.dot(v_te_global, self.e_xi)
+        v_te_eta_comp = np.dot(v_te_global, self.e_eta)
+
+        # Calcula o ângulo a partir do eixo eta (e_eta) em direção ao eixo xi (e_xi)
+        # A chamada é arctan2(componente_x, componente_y) para medir a partir do eixo Y
+        self.sweep_le = np.arctan2(v_le_xi_comp, v_le_eta_comp)
+        self.sweep_te = np.arctan2(v_te_xi_comp, v_te_eta_comp)
+        
+        # Opcional: Calcular o enflechamento da corda média
+        v_mc_global = 0.5 * (self.p3 + self.p4) - 0.5 * (self.p1 + self.p2)
+        v_mc_xi_comp = np.dot(v_mc_global, self.e_xi)
+        v_mc_eta_comp = np.dot(v_mc_global, self.e_eta)
+        self.sweep_mc = np.arctan2(v_mc_xi_comp, v_mc_eta_comp)
 
     def compute_half_chord(self):
         leading_edge_mid = 0.5 * (self.p1 + self.p2)  # p1, p2
@@ -409,14 +412,6 @@ class DVE:
     def compute_half_span(self):
         span_vector = self.p2 - self.p1  # p2 - p1
         return 0.5 * np.linalg.norm(span_vector)
-
-    def compute_quadratic_dve_velocity(self, x_local):
-        """
-        Calcula a velocidade induzida no ponto x_local pelo DVE atual com vorticidade γ(η) = A + Bη + Cη²
-        """
-        A, B, C = self.gamma_coeffs
-        F1, F2, F3 = self.get_influence_terms_quadratic_eta(x_local)
-        return A * F1 + B * F2 + C * F3
 
     def control_points_spanwise(self):
         """
@@ -454,7 +449,6 @@ class DVE:
         v_total_global = self.local2global_vector(v_total_local)
 
         return v_total_global
-
 
     def __compute_filament_velocity(self, point, gamma_coeffs, sweep_angle):
         """
@@ -495,7 +489,6 @@ class DVE:
         M = np.array([[a1xi, a1eta, a1zeta], [b1xi, b1eta, b1zeta], [c1xi, c1eta, c1zeta]]).T
 
         return (-1/4*np.pi)*M@gamma_coeffs.T
-
 
     def __compute_sheet_velocity(self, point, gamma_coeffs, sweep_angle, kse, kle):
         A, B, C = gamma_coeffs
@@ -556,8 +549,6 @@ class DVE:
         M = np.array([[0, 0, 0], [0, b2eta, c2eta], [0, b2zeta, c2zeta]])
 
         return (-1/(4*np.pi))*M@gamma_coeffs.T
-        
-
         
     def calculate_kle(self):
         """
@@ -679,97 +670,226 @@ class DVE:
     
     def __calculate_G27(self, t):
         return t
+
+    def calculate_forces(self, all_dves, omega, rho, V_freestream):
+        """
+        Calcula a força e o momento aerodinâmico neste DVE usando Kutta-Joukowski.
+        A integral é resolvida numericamente com Quadratura de Gauss-Legendre de 3 pontos.
+        """
+        # Pontos e pesos de Gauss-Legendre para n=3
+        eta_points = np.array([-0.77459667, 0.0, 0.77459667])
+        weights = np.array([0.55555556, 0.88888889, 0.55555556])
+
+        total_force = np.zeros(3)
+        total_moment = np.zeros(3)
+
+        # Contribuição de ambos os filamentos (LE e TE)
+        filaments = [
+            {'origin': self.mid_le, 'edge_vector': self.p4 - self.p1, 'coeffs': self.gamma_coeffs},      # Borda de Ataque (LE)
+            {'origin': self.mid_te, 'edge_vector': self.p3 - self.p2, 'coeffs': -self.gamma_coeffs}     # Borda de Fuga (TE)
+        ]
+
+        for filament in filaments:
+            for i in range(len(eta_points)):
+                # Posição do ponto de quadratura no espaço local (eta)
+                eta_local = self.half_span * eta_points[i]
+
+                # 1. Posição GLOBAL do ponto de quadratura no filamento
+                # O vetor da aresta já tem a direção da envergadura e o enflechamento
+                point_global = filament['origin'] + (eta_local / self.half_span) * (0.5 * filament['edge_vector'])
+
+                # 2. Velocidade do escoamento livre + rotação no ponto
+                r_vec = point_global # Vetor do centro de rotação (0,0,0) ao ponto
+                V_rotation = np.cross(omega, r_vec)
+                V_onset = V_freestream + V_rotation
+
+                # 3. Velocidade induzida por TODOS os DVEs (pás e esteira) neste ponto
+                V_induced = np.zeros(3)
+                # NOTA: esta lista 'all_dves' deve incluir os DVEs da pá e da esteira
+                for other_dve in all_dves:
+                    kse = 0.01 * other_dve.half_span * 2 # Exemplo
+                    kle = other_dve.calculate_kle()
+                    V_induced += other_dve.induced_velocity(point_global, kse, kle)
+                
+                # 4. Velocidade total no ponto
+                V_total = V_onset + V_induced
+
+                # 5. Vetor de circulação Γ(η) * dL no ponto
+                A, B, C = filament['coeffs']
+                circulation_strength = A + B * eta_local + C * eta_local**2
+                # dL é o vetor do filamento, já na direção correta
+                dGamma_vec = circulation_strength * filament['edge_vector']
+
+                # 6. Força de Kutta-Joukowski (dF = rho * V x dGamma)
+                # A integral é a soma ponderada das forças nos pontos de quadratura
+                force_at_point = rho * np.cross(V_total, dGamma_vec)
+                total_force += force_at_point * weights[i]
+
+                # 7. Momento em relação à origem (r x F)
+                moment_at_point = np.cross(r_vec, force_at_point)
+                total_moment += moment_at_point * weights[i]
+
+        return total_force, total_moment
+
 class DVESolver:
-    def __init__(self, dves, V_inf=np.array([1.0, 0.0, 0.0])):
+    def __init__(self, dves, omega, rho, V_inf=np.array([1.0, 0.0, 0.0])):
         self.dves = dves
         self.V_inf = V_inf
-        self.A = None
-        self.b = None
+        self.D = None
+        self.R = None
         self.gamma = None
+        self.omega = omega
+        self.rho = rho
 
-    def assemble(self):
-        N = len(self.dves)
-        rows = []  # lista de linhas da matriz A
-        rhs = []   # lado direito do sistema (vetor b)
+        self.assemble_system()
 
-        # === (1) Condição cinemática: não-penetração em 3 pontos por DVE ===
-        for j, dve_j in enumerate(self.dves):
-            x_cp_list = dve_j.control_points_spanwise()
-            n_j = dve_j.normal
+    def assemble_system(self):
+        n = len(self.dves)
+        self.D = np.zeros((3*n, 3*n))
+        self.R = np.zeros(3*n)
 
-            for m, x_j in enumerate(x_cp_list):
-                row = np.zeros(3 * N)
-                rhs_value = -np.dot(n_j, self.V_inf)
+        row_index = 0
+        # --- Preenchendo as primeiras 'n' linhas de D e R ---
+        for i, dve_i in enumerate(self.dves):
+            # Lado Direito (R): Contribuição do escoamento livre
+            # (Vento + Rotação, que você precisará calcular no ponto de controle)
+            # Por simplicidade, vamos usar apenas o freestream por enquanto.
+            V_freestream_at_cp = self.V_inf # Em um caso real, some a rotação
+            self.R[row_index] = -np.dot(V_freestream_at_cp, dve_i.normal)
 
-                for i, dve_i in enumerate(self.dves):
-                    x_j_local = dve_i.global2local(x_j)
-                    F1, F2, F3 = dve_i.get_influence_terms_quadratic_eta(x_j_local)
+            # Lado Esquerdo (D): Contribuição da velocidade induzida
+            for j, dve_j in enumerate(self.dves):
+                kse = 0.0 # Conforme os documentos, kse/kle são para casos específicos
+                kle = 0.0 # que não se aplicam aqui.
 
-                    for k, Fk in enumerate([F1, F2, F3]):
-                        col = i * 3 + k
-                        row[col] = np.dot(n_j, dve_i.local2global(Fk))
+                # Influência do coeficiente A do DVE j no ponto de controle do DVE i
+                dve_j.gamma_coeffs = np.array([1., 0., 0.])
+                vel_A = dve_j.induced_velocity(dve_i.control_point, kse, kle)
+                self.D[row_index, 3*j + 0] = np.dot(vel_A, dve_i.normal)
 
-                rows.append(row)
-                rhs.append(rhs_value)
+                # Influência do coeficiente B
+                dve_j.gamma_coeffs = np.array([0., 1., 0.])
+                vel_B = dve_j.induced_velocity(dve_i.control_point, kse, kle)
+                self.D[row_index, 3*j + 1] = np.dot(vel_B, dve_i.normal)
 
-        # === (2) Continuidade de vorticidade entre DVEs vizinhos (spanwise) ===
-        for i in range(N - 1):
-            dve_left = self.dves[i]
-            dve_right = self.dves[i + 1]
+                # Influência do coeficiente C
+                dve_j.gamma_coeffs = np.array([0., 0., 1.])
+                vel_C = dve_j.induced_velocity(dve_i.control_point, kse, kle)
+                self.D[row_index, 3*j + 2] = np.dot(vel_C, dve_i.normal)
 
-            # Eq: γ_left(+h/2) = γ_right(-h/2)
-            eta = dve_left.half_span / 2
-            row = np.zeros(3 * N)
-            row[i * 3 + 0] = 1             # A_left
-            row[i * 3 + 1] = eta           # B_left
-            row[i * 3 + 2] = eta ** 2     # C_left
+                # Resetar os coeficientes para não afetar outros cálculos
+                dve_j.gamma_coeffs = np.array([0., 0., 0.])
+                
+            row_index += 1
 
-            row[(i+1) * 3 + 0] = -1             # -A_right
-            row[(i+1) * 3 + 1] = -(-eta)        # -B_right
-            row[(i+1) * 3 + 2] = -(-eta) ** 2   # -C_right
+        # --- Preenchendo as próximas 2*(n-1) linhas de D ---
+        for i in range(n - 1):
+            dve_i = self.dves[i]
+            dve_i_plus_1 = self.dves[i+1]
+            eta_i = dve_i.half_span
+            eta_i_plus_1 = dve_i_plus_1.half_span
 
-            rows.append(row)
-            rhs.append(0.0)
+            # Condição de Continuidade da Circulação (Gamma)
+            # Aᵢ + Bᵢηᵢ + Cᵢηᵢ² = Aᵢ₊₁ - Bᵢ₊₁ηᵢ₊₁ + Cᵢ₊₁ηᵢ₊₁²
+            self.D[row_index, 3*i + 0] = 1.0
+            self.D[row_index, 3*i + 1] = eta_i
+            self.D[row_index, 3*i + 2] = eta_i**2
+            self.D[row_index, 3*(i+1) + 0] = -1.0
+            self.D[row_index, 3*(i+1) + 1] = eta_i_plus_1
+            self.D[row_index, 3*(i+1) + 2] = -eta_i_plus_1**2
+            self.R[row_index] = 0.0
+            row_index += 1
 
-            # Eq: dγ_left/dη(+h/2) = dγ_right/dη(-h/2)
-            row = np.zeros(3 * N)
-            row[i * 3 + 1] = 1                 # B_left
-            row[i * 3 + 2] = 2 * eta           # 2*C_left
+            # Condição de Continuidade da Vorticidade (gamma)
+            # Bᵢ + 2Cᵢηᵢ = Bᵢ₊₁ - 2Cᵢ₊₁ηᵢ₊₁
+            self.D[row_index, 3*i + 1] = 1.0
+            self.D[row_index, 3*i + 2] = 2 * eta_i
+            self.D[row_index, 3*(i+1) + 1] = -1.0
+            self.D[row_index, 3*(i+1) + 2] = 2 * eta_i_plus_1
+            self.R[row_index] = 0.0
+            row_index += 1
 
-            row[(i+1) * 3 + 1] = -1            # -B_right
-            row[(i+1) * 3 + 2] = -2 * (-eta)   # -2*C_right
+        # --- Preenchendo as 2 últimas linhas de D ---
+        # Condição na Raiz (primeiro DVE, i=0, na borda interna η = -η₀)
+        root_dve = self.dves[0]
+        eta_root = root_dve.half_span
+        # A₀ - B₀η₀ + C₀η₀² = 0
+        self.D[row_index, 0] = 1.0
+        self.D[row_index, 1] = -eta_root
+        self.D[row_index, 2] = eta_root**2
+        self.R[row_index] = 0.0
+        row_index += 1
 
-            rows.append(row)
-            rhs.append(0.0)
-
-        # === (3) Condições de contorno na raiz e ponta ===
-        # Exemplo: γ = 0 na ponta (último painel)
-        eta_tip = self.dves[-1].half_span / 2
-        row = np.zeros(3 * N)
-        row[-3] = 1                      # A_last
-        row[-2] = eta_tip               # B_last
-        row[-1] = eta_tip ** 2          # C_last
-        rows.append(row)
-        rhs.append(0.0)
-
-        # Exemplo: dγ/dη = 0 na raiz (primeiro painel)
-        eta_root = -self.dves[0].half_span / 2
-        row = np.zeros(3 * N)
-        row[1] = 1                      # B_0
-        row[2] = 2 * eta_root           # 2*C_0
-        rows.append(row)
-        rhs.append(0.0)
-
-        # === Finalização do sistema ===
-        self.A = np.vstack(rows)
-        self.b = np.array(rhs)
-
+        # Condição na Ponta (último DVE, i=n-1, na borda externa η = +ηₙ₋₁)
+        tip_dve = self.dves[n-1]
+        eta_tip = tip_dve.half_span
+        # Aₙ₋₁ + Bₙ₋₁ηₙ₋₁ + Cₙ₋₁(ηₙ₋₁)² = 0
+        self.D[row_index, 3*(n-1) + 0] = 1.0
+        self.D[row_index, 3*(n-1) + 1] = eta_tip
+        self.D[row_index, 3*(n-1) + 2] = eta_tip**2
+        self.R[row_index] = 0.0
+    
     def solve(self):
-        self.gamma = np.linalg.solve(self.A, self.b)
-        for i, dve in enumerate(self.dves):
-            dve.gamma_coeffs = self.gamma[i*3:(i+1)*3]
+        try:
+            self.gamma = np.linalg.solve(self.D, self.R)
+            for i, dve in enumerate(self.dves):
+                dve.gamma_coeffs = self.gamma[i*3:(i+1)*3]
+            print("Sistema resolvido com sucesso. Coeficientes de circulação atualizados.")
 
+        except np.linalg.LinAlgError:
+            print("ERRO: A matriz de influência [D] é singular.")
+            print("Isso geralmente indica um problema na definição das condições de contorno.")
+            # Você pode querer parar a execução ou lidar com o erro de outra forma
+            self.gamma = np.zeros(len(self.R)) # Define como zero para evitar mais erros
+    
+    def compute_performance(self):
+        """
+        Calcula os coeficientes aerodinâmicos totais do rotor.
+        Deve ser chamado DEPOIS de self.solve().
+        """
+        rotor_total_force = np.zeros(3)
+        rotor_total_torque = np.zeros(3)
+        
+        # Coletar todos os DVEs (pás e esteira) que induzem velocidade
+        all_dves = []
+        for blade in self.rotor.blades:
+            all_dves.extend(blade.dves)
+        # all_dves.extend(self.wake.dves) # Adicione a esteira quando ela existir
+
+        # Iterar sobre cada pá para somar as forças
+        for blade in self.rotor.blades:
+            for dve in blade.dves:
+                # O DVE calcula sua própria força com base na influência de todos
+                force, torque = dve.calculate_forces(
+                    all_dves, 
+                    np.array([self.U_inf, 0, 0]), 
+                    self.omega_vec, 
+                    self.rho
+                )
+                rotor_total_force += force
+                rotor_total_torque += torque
+
+        # Extrair Empuxo (Thrust) e Potência (Power)
+        # Empuxo é a força ao longo do eixo de rotação (eixo X)
+        thrust = rotor_total_force[0]
+        
+        # Torque é o momento ao longo do eixo de rotação (eixo X)
+        torque_axial = rotor_total_torque[0]
+        
+        # Potência = Torque * Velocidade Angular
+        power = torque_axial * self.omega_vec[0]
+
+        # Normalização para obter os coeficientes
+        rotor_radius = self.rotor.R
+        rotor_area = np.pi * rotor_radius**2
+        
+        Cp = power / (0.5 * self.rho * rotor_area * self.U_inf**3)
+        Ct = thrust / (0.5 * self.rho * rotor_area * self.U_inf**2)
+
+        return Cp, Ct
+    
     def run(self):
         self.assemble()
         self.solve()
+        self.compute_performance()
 
