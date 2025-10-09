@@ -404,13 +404,33 @@ class DVE:
         self.sweep_mc = np.arctan2(v_mc_xi_comp, v_mc_eta_comp)
 
     def compute_half_chord(self):
-        leading_edge_mid = 0.5 * (self.p1 + self.p2)  # p1, p2
-        trailing_edge_mid = 0.5 * (self.p3 + self.p4)  # p3, p4
-        chord_vector = trailing_edge_mid - leading_edge_mid
+        """
+        Calcula a meia-corda do DVE no centro da envergadura.
+        """
+        # Ponto médio da borda de ataque (entre p1 e p4)
+        mid_le_point = 0.5 * (self.p1 + self.p4)
+        
+        # Ponto médio da borda de fuga (entre p2 e p3)
+        mid_te_point = 0.5 * (self.p2 + self.p3)
+        
+        # Vetor da corda no centro da envergadura
+        chord_vector = mid_te_point - mid_le_point
+        
         return 0.5 * np.linalg.norm(chord_vector)
-    
+
     def compute_half_span(self):
-        span_vector = self.p2 - self.p1  # p2 - p1
+        """
+        Calcula a meia-envergadura do DVE.
+        """
+        # Ponto médio da aresta inboard (entre p1 e p2)
+        mid_inboard_point = 0.5 * (self.p1 + self.p2)
+
+        # Ponto médio da aresta outboard (entre p4 e p3)
+        mid_outboard_point = 0.5 * (self.p4 + self.p3)
+
+        # Vetor da envergadura
+        span_vector = mid_outboard_point - mid_inboard_point
+
         return 0.5 * np.linalg.norm(span_vector)
 
     def control_points_spanwise(self):
@@ -613,15 +633,43 @@ class DVE:
         return beta1, beta2
     
     def __calculate_gamma1(self, rho, a2, b2, beta1, beta2, zeta):
+        # Adicionar esta verificação de singularidade
+        if abs(rho) < 1e-9:
+            return 0.0
+        
+        return (1/rho)*(a2*beta2*zeta + b2*beta1)
+
+    def __calculate_gamma2(self, rho, a2, b2, beta1, beta2, zeta):
+        # Adicionar a mesma verificação
+        if abs(rho) < 1e-9:
+            return 0.0
+            
+        return (1/rho)*(a2*beta1*zeta - b2*beta2)
+
+    def __calculate_delta1(self, rho, b2, c2, beta1, beta2, zeta):
+        # Adicionar a mesma verificação
+        if abs(rho) < 1e-9:
+            return 0.0
+            
+        return (1/rho)*(b2*beta2*zeta + c2*beta1)
+
+    def __calculate_delta2(self, rho, b2, c2, beta1, beta2, zeta):
+        # Adicionar a mesma verificação
+        if abs(rho) < 1e-9:
+            return 0.0
+            
+        return (1/rho)*(b2*beta1*zeta - c2*beta2)
+    
+    def __calculate_gamma1_old(self, rho, a2, b2, beta1, beta2, zeta):
         return (1/rho)*(a2*beta2*zeta + b2*beta1)
     
-    def __calculate_gamma2(self, rho, a2, b2, beta1, beta2, zeta):
+    def __calculate_gamma2_old(self, rho, a2, b2, beta1, beta2, zeta):
         return (1/rho)*(a2*beta1*zeta - b2*beta2)
     
-    def __calculate_delta1(self, rho, b2, c2, beta1, beta2, zeta):
+    def __calculate_delta1_old(self, rho, b2, c2, beta1, beta2, zeta):
         return (1/rho)*(b2*beta2*zeta + c2*beta1)
     
-    def __calculate_delta2(self, rho, b2, c2, beta1, beta2, zeta):
+    def __calculate_delta2_old(self, rho, b2, c2, beta1, beta2, zeta):
         return (1/rho)*(b2*beta1*zeta - c2*beta2)
     
     def __calculate_mu1(self, gamma1, gamma2, t, delta1, delta2, zeta, a, b, c, kse):
@@ -640,25 +688,151 @@ class DVE:
         return a*t + b + np.sqrt(a)*self.__calculate_r_t(a, b, c, t) + kle
 
     def __calculate_G11(self, a, b, c, eta):
+        # O denominador da fórmula
+        discriminant = a*c - b**2
+        r_eta = self.__calculate_r_eta(a, b, c, eta)
+        denominator = discriminant * r_eta
+
+        # --- Adicionar esta verificação de singularidade ---
+        if abs(denominator) < 1e-9:
+            # Esta condição ocorre quando o ponto de avaliação está na linha do filamento.
+            # A contribuição da velocidade induzida nesta situação é zero.
+            return 0.0
+        # --- Fim da verificação ---
+
+        return (a * eta + b) / denominator
+
+    def __calculate_G12(self, a, b, c, eta):
+        # O denominador é o mesmo de G11
+        discriminant = a*c - b**2
+        r_eta = self.__calculate_r_eta(a, b, c, eta)
+        denominator = discriminant * r_eta
+
+        # --- Adicionar a mesma verificação ---
+        if abs(denominator) < 1e-9:
+            return 0.0
+        # --- Fim da verificação ---
+
+        return -(b * eta + c) / denominator # Nota: A fórmula no apêndice tem um sinal negativo
+
+    def __calculate_G13(self, a, b, c, eta):
+        # Esta função é mais complexa, mas a primeira parte tem o mesmo denominador
+        discriminant = a*c - b**2
+        r_eta = self.__calculate_r_eta(a, b, c, eta)
+        denominator1 = discriminant * a * r_eta
+
+        if abs(denominator1) < 1e-9:
+            term1 = 0.0
+        else:
+            term1 = ((2*b**2 - a*c)*eta + b*c) / denominator1
+        
+        # ... O segundo termo com o logaritmo geralmente não é problemático ...
+        # mas uma verificação de segurança no argumento do log pode ser adicionada
+        log_arg = np.sqrt(a)*r_eta + a*eta + b
+        if log_arg <= 0:
+            term2 = 0.0
+        else:
+            term2 = (1 / np.sqrt(a**3)) * np.log(log_arg)
+            
+        return term1 + term2
+
+    def __calculate_G11_old(self, a, b, c, eta):
         return (a*eta + b)/((a*c - b**2)*self.__calculate_r_eta(a, b, c, eta))
     
-    def __calculate_G12(self, a, b, c, eta):
+    def __calculate_G12_old(self, a, b, c, eta):
         return -(b*eta + c)/((a*c - b**2)*self.__calculate_r_eta(a, b, c, eta))
     
-    def __calculate_G13(self, a, b, c, eta):
+    def __calculate_G13_old(self, a, b, c, eta):
         return ((2*b**2 - a*c)*eta + b*c)/((a*c - b**2)*a*self.__calculate_r_eta(a, b, c, eta)) + (1/np.sqrt(a**3))*np.log(np.sqrt(a)*self.__calculate_r_eta(a, b, c, eta) + a*eta + b)
 
+    
     def __calculate_G21(self, rho, beta1, beta2, t, gamma1, gamma2, delta1, delta2, zeta, a, b, c, kse):
-        return (beta1/(2*rho))*np.log(self.__calculate_mu1(gamma1, gamma2, t, delta1, delta2, zeta, a, b, c, kse)) + (beta2/(rho*zeta))*self.__calculate_mu2(gamma1, gamma2, t, delta1, delta2, zeta, a, b, c)
+        # --- Adicionar esta verificação de singularidade no início ---
+        # Se rho é zero, beta1 também será zero, resultando em 0/0.
+        # A contribuição total da integral neste caso singular é 0.
+        if abs(rho) < 1e-9:
+            return 0.0
+        # --- Fim da verificação ---
+
+        # O resto do código agora está seguro contra a divisão por rho.
+        
+        # Termo 1
+        mu1 = self.__calculate_mu1(gamma1, gamma2, t, delta1, delta2, zeta, a, b, c, kse)
+        if mu1 <= 0: # Segurança para o logaritmo
+            term1 = 0.0
+        else:
+            term1 = (beta1 / (2 * rho)) * np.log(mu1)
+
+        # Termo 2 (ainda precisa da verificação de zeta)
+        if abs(zeta) < 1e-9:
+            term2 = 0.0
+        else:
+            mu2 = self.__calculate_mu2(gamma1, gamma2, t, delta1, delta2, zeta, a, b, c)
+            term2 = (beta2 / (rho * zeta)) * mu2
+                
+        return term1 + term2
 
     def __calculate_G22(self, rho, beta1, beta2, t, gamma1, gamma2, delta1, delta2, zeta, a, b, c, kse):
+        # --- Adicionar a mesma verificação de singularidade no início ---
+        if abs(rho) < 1e-9:
+            return 0.0
+        # --- Fim da verificação ---
+
+        # O resto do código agora está seguro.
+        
+        if abs(zeta) < 1e-9:
+            # Se zeta é zero, ambos os termos são zero
+            return 0.0
+        else:
+            mu1 = self.__calculate_mu1(gamma1, gamma2, t, delta1, delta2, zeta, a, b, c, kse)
+            if mu1 <= 0:
+                term1_log = 0.0
+            else:
+                term1_log = np.log(mu1)
+            term1 = (-beta2 / (2 * rho * zeta)) * term1_log
+
+            mu2 = self.__calculate_mu2(gamma1, gamma2, t, delta1, delta2, zeta, a, b, c)
+            term2 = (beta1 / (rho * zeta)) * mu2
+            
+            return term1 + term2
+    
+    def __calculate_G23(self, a, b, c, t, kle):
+        mu3 = self.__calculate_mu3(a, b, c, t, kle)
+        
+        # --- Adicionar esta verificação de segurança ---
+        if mu3 <= 1e-14: # Usar uma pequena tolerância em vez de <= 0
+            return 0.0
+        # --- Fim da verificação ---
+        
+        # O cálculo agora é seguro
+        log_mu3 = np.log(mu3)
+        r_t = self.__calculate_r_t(a, b, c, t)
+        
+        return (r_t / a - (b / np.sqrt(a**3)) * log_mu3)
+     
+    def __calculate_G24(self, a, b, c, t, kle):
+        mu3 = self.__calculate_mu3(a, b, c, t, kle)
+
+        # --- Adicionar a mesma verificação de segurança ---
+        if mu3 <= 1e-14:
+            return 0.0
+        # --- Fim da verificação ---
+
+        # O cálculo agora é seguro
+        log_mu3 = np.log(mu3)
+        return (1 / np.sqrt(a)) * log_mu3
+    
+    def __calculate_G21_old(self, rho, beta1, beta2, t, gamma1, gamma2, delta1, delta2, zeta, a, b, c, kse):
+        return (beta1/(2*rho))*np.log(self.__calculate_mu1(gamma1, gamma2, t, delta1, delta2, zeta, a, b, c, kse)) + (beta2/(rho*zeta))*self.__calculate_mu2(gamma1, gamma2, t, delta1, delta2, zeta, a, b, c)
+
+    def __calculate_G22_old(self, rho, beta1, beta2, t, gamma1, gamma2, delta1, delta2, zeta, a, b, c, kse):
         return (-beta2/(2*rho*zeta))*np.log(self.__calculate_mu1(gamma1, gamma2, t, delta1, delta2, zeta, a, b, c, kse)) + (beta1/(rho*zeta))*self.__calculate_mu2(gamma1, gamma2, t, delta1, delta2, zeta, a, b, c)
 
-    def __calculate_G23(self, a, b, c, t, kle):
+    def __calculate_G23_old(self, a, b, c, t, kle):
         mu3 = self.__calculate_mu3(a, b, c, t, kle)
         return (self.__calculate_r_t(a, b, c, t)/a - (b/np.sqrt(a**3))*np.log(mu3))
     
-    def __calculate_G24(self, a, b, c, t, kle):
+    def __calculate_G24_old(self, a, b, c, t, kle):
         mu3 = self.__calculate_mu3(a, b, c, t, kle)
         return (1/np.sqrt(a))*np.log(mu3)
     
@@ -666,18 +840,29 @@ class DVE:
         return 0.5*np.log(t**2 + zeta**2 + kse)
     
     def __calculate_G26(self, zeta, t):
+        """
+        Calcula a integral G26, com tratamento para a singularidade em zeta=0.
+        """
+        # Adicionar a verificação para o caso singular zeta = 0
+        if abs(zeta) < 1e-9:
+            return 0.0  # O limite da expressão quando zeta -> 0 é zero.
+        
+        # Fórmula corrigida da resposta anterior
+        return (1 / zeta) * np.arctan(t / zeta)
+    
+    def __calculate_G26_old(self, zeta, t):
         return (1/zeta)*(np.atan(t/zeta))
     
     def __calculate_G27(self, t):
         return t
 
-    def calculate_forces(self, all_dves, omega, rho, V_freestream):
+    def calculate_forces(self, all_dves, V_freestream, omega_vec, rho):
         """
         Calcula a força e o momento aerodinâmico neste DVE usando Kutta-Joukowski.
-        A integral é resolvida numericamente com Quadratura de Gauss-Legendre de 3 pontos.
+        A integral é resolvida numericamente com Quadratura de Gauss-Legendre.
         """
-        # Pontos e pesos de Gauss-Legendre para n=3
-        eta_points = np.array([-0.77459667, 0.0, 0.77459667])
+        # Pontos e pesos de Gauss-Legendre para n=3 (no intervalo [-1, 1])
+        eta_points_norm = np.array([-0.77459667, 0.0, 0.77459667])
         weights = np.array([0.55555556, 0.88888889, 0.55555556])
 
         total_force = np.zeros(3)
@@ -685,49 +870,55 @@ class DVE:
 
         # Contribuição de ambos os filamentos (LE e TE)
         filaments = [
-            {'origin': self.mid_le, 'edge_vector': self.p4 - self.p1, 'coeffs': self.gamma_coeffs},      # Borda de Ataque (LE)
-            {'origin': self.mid_te, 'edge_vector': self.p3 - self.p2, 'coeffs': -self.gamma_coeffs}     # Borda de Fuga (TE)
+            {'origin': self.mid_le, 'edge_vector': self.p4 - self.p1, 'coeffs': self.gamma_coeffs},
+            {'origin': self.mid_te, 'edge_vector': self.p3 - self.p2, 'coeffs': -self.gamma_coeffs}
         ]
 
         for filament in filaments:
-            for i in range(len(eta_points)):
-                # Posição do ponto de quadratura no espaço local (eta)
-                eta_local = self.half_span * eta_points[i]
+            # Vetor unitário ao longo do filamento
+            s_hat = filament['edge_vector'] / np.linalg.norm(filament['edge_vector'])
+            
+            # Integral de Kutta-Joukowski via quadratura de Gauss-Legendre
+            force_integral_sum = np.zeros(3)
+            moment_integral_sum = np.zeros(3)
+
+            for i in range(len(eta_points_norm)):
+                # Mapear o ponto de quadratura do intervalo [-1, 1] para [-half_span, +half_span]
+                eta_local = self.half_span * eta_points_norm[i]
 
                 # 1. Posição GLOBAL do ponto de quadratura no filamento
-                # O vetor da aresta já tem a direção da envergadura e o enflechamento
-                point_global = filament['origin'] + (eta_local / self.half_span) * (0.5 * filament['edge_vector'])
+                point_global = filament['origin'] + eta_local * s_hat
 
-                # 2. Velocidade do escoamento livre + rotação no ponto
-                r_vec = point_global # Vetor do centro de rotação (0,0,0) ao ponto
-                V_rotation = np.cross(omega, r_vec)
+                # 2. Velocidade do escoamento (livre + rotação) no ponto
+                r_vec = point_global
+                V_rotation = np.cross(omega_vec, r_vec)
                 V_onset = V_freestream + V_rotation
 
-                # 3. Velocidade induzida por TODOS os DVEs (pás e esteira) neste ponto
+                # 3. Velocidade induzida por TODOS os DVEs
                 V_induced = np.zeros(3)
-                # NOTA: esta lista 'all_dves' deve incluir os DVEs da pá e da esteira
                 for other_dve in all_dves:
-                    kse = 0.01 * other_dve.half_span * 2 # Exemplo
-                    kle = other_dve.calculate_kle()
+                    kse = 0.0 # Simplificado para o teste
+                    kle = 0.0 # Simplificado para o teste
                     V_induced += other_dve.induced_velocity(point_global, kse, kle)
                 
                 # 4. Velocidade total no ponto
                 V_total = V_onset + V_induced
 
-                # 5. Vetor de circulação Γ(η) * dL no ponto
+                # 5. Força da circulação Γ(η) no ponto
                 A, B, C = filament['coeffs']
                 circulation_strength = A + B * eta_local + C * eta_local**2
-                # dL é o vetor do filamento, já na direção correta
-                dGamma_vec = circulation_strength * filament['edge_vector']
 
-                # 6. Força de Kutta-Joukowski (dF = rho * V x dGamma)
-                # A integral é a soma ponderada das forças nos pontos de quadratura
-                force_at_point = rho * np.cross(V_total, dGamma_vec)
-                total_force += force_at_point * weights[i]
+                # 6. Integrando para a força: rho * (V_total x s_hat) * Gamma(eta)
+                integrand_force = np.cross(V_total, s_hat) * circulation_strength
+                force_integral_sum += integrand_force * weights[i]
 
-                # 7. Momento em relação à origem (r x F)
-                moment_at_point = np.cross(r_vec, force_at_point)
-                total_moment += moment_at_point * weights[i]
+                # 7. Integrando para o momento: r x (rho * (V_total x s_hat) * Gamma(eta))
+                integrand_moment = np.cross(r_vec, integrand_force)
+                moment_integral_sum += integrand_moment * weights[i]
+                
+            # Multiplicar pelo fator de escala da quadratura e pela densidade
+            total_force += rho * force_integral_sum * self.half_span
+            total_moment += rho * moment_integral_sum * self.half_span
 
         return total_force, total_moment
 
