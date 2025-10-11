@@ -307,6 +307,26 @@ class PropellerGeometry:
         plt.tight_layout()
         plt.show()
 
+    def get_trailing_edge_dves(self):
+        """
+        Retorna uma lista dos DVEs localizados na borda de fuga da pá.
+        """
+        if not hasattr(self, 'dves') or not self.dves:
+            return []
+
+        trailing_edge_dves = []
+        # Os DVEs são armazenados em ordem: primeiro a corda, depois a envergadura.
+        # Para uma fileira j (na envergadura) e uma coluna i (na corda), o índice é j*m + i.
+        # Os DVEs da borda de fuga são aqueles na última coluna da malha, ou seja, i = m_chord - 1.
+        
+        for j in range(self.n_span - 1): # Itera sobre cada fileira ao longo da envergadura
+            # O índice do DVE na borda de fuga para a fileira j é (j * m_chord) + (m_chord - 1)
+            # O que pode ser simplificado para (j + 1) * m_chord - 1
+            te_dve_index = (j + 1) * self.m_chord - 1
+            trailing_edge_dves.append(self.dves[te_dve_index])
+            
+        return trailing_edge_dves
+
     def __calculate_kse(self):
         """
         Calcula o coeficiente de suavização da borda lateral (kse) para a pá.
@@ -1204,7 +1224,17 @@ class Rotor:
             all_dves.extend(blade.dves)
         return all_dves
     
+    def get_trailing_edge_dves(self):
+        """
+        Retorna uma lista com todos os DVEs de borda de fuga de todas as pás do rotor.
+        """
+        all_te_dves = []
+        for blade in self.blades:
+            all_te_dves.extend(blade.get_trailing_edge_dves())
+        return all_te_dves
+
     def plot(self, real_profile = False):
+
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='3d')
 
@@ -1222,3 +1252,124 @@ class Rotor:
         ax.set_title(f"Rotor Geometry with {self.num_blades} Blades")
         plt.tight_layout()
         plt.show()
+
+class Wake:
+    def __init__(self, rotor, U_inf, theta, omega, type = 'fixed', n_rows=20, initial_induction_factor=1/3):
+        """
+        Inicializa a esteira.
+        
+        Args:
+            rotor (Rotor): A instância do rotor.
+            U_inf (float): Velocidade do escoamento livre [m/s].
+            theta (float): Ângulo de discretização da esteira
+            omega (float): Velocidade de rotação [rad/s].
+            n_rows (int): Número de fileiras de DVEs para gerar na esteira inicial.
+            initial_induction_factor (float): Fator 'a' para estimar a velocidade na esteira.
+        """
+        self.rows = []
+        self.type = type
+        self.n_rows = n_rows
+        self.__generate_wake(type, rotor, U_inf, theta, omega, n_rows, initial_induction_factor)
+
+    def __generate_wake(self, type, rotor, U_inf, theta, omega, n_rows, initial_induction_factor):
+        match type:
+            case 'fixed':
+                self.__generate_initial_fixed_wake(rotor, U_inf, theta, omega, n_rows, initial_induction_factor)
+            case 'relaxed':
+                self.__generate_initial_relaxed_wake()
+            case 'semi':
+                self.__generate_initial_semirelaxed_wake()
+            case _:
+                self.__generate_initial_fixed_wake(rotor, U_inf, theta, omega, n_rows, initial_induction_factor)
+
+
+    def __generate_initial_fixed_wake(self, rotor, U_inf, theta, omega, n_rows, induction_factor):
+        """
+        Gera uma geometria de esteira helicoidal inicial com base na cinemática do rotor.
+        """
+        print(f"Gerando esteira inicial fixa com {n_rows} fileiras...")
+
+        # 1. Velocidade efetiva e passo de tempo para a construção da esteira
+        V_eff = U_inf * (1 - induction_factor)
+        # Define um passo de tempo baseado em uma rotação de, por exemplo, 10 graus
+        dt = np.deg2rad(theta) / omega
+
+        # 2. Pega os pontos da borda de fuga das pás na posição t=0 como base
+        te_dves_t0 = rotor.get_trailing_edge_dves()
+        
+        # Extrai os nós (pontos de canto) da borda de fuga.
+        # Para uma pá, teremos uma linha de nós (p2, p3)
+        # Precisamos organizar isso por pá.
+        
+        helical_lines = []
+        for blade in rotor.blades:
+            te_nodes_blade = []
+            te_dves_blade = blade.get_trailing_edge_dves()
+            # Adiciona o primeiro ponto (p2 do primeiro DVE da TE)
+            te_nodes_blade.append(te_dves_blade[0].p2)
+            # Adiciona os pontos p3 de todos os DVEs da TE
+            for dve in te_dves_blade:
+                te_nodes_blade.append(dve.p3)
+            helical_lines.append(np.array(te_nodes_blade))
+
+        # 3. "Viaja para trás no tempo", gerando as "costelas" da esteira
+        wake_lines_by_age = [helical_lines] # A linha de idade 0 está em t=0
+        
+        for k in range(1, n_rows + 1): # Para cada passo de tempo no passado
+            age = k * dt
+            rotation_angle = omega * age
+            axial_translation = np.array([V_eff * age, 0, 0])
+
+            rot_matrix = np.array([
+                [1, 0, 0],
+                [0, np.cos(rotation_angle), -np.sin(rotation_angle)],
+                [0, np.sin(rotation_angle), np.cos(rotation_angle)]
+            ])
+
+            # Calcula a posição das linhas helicoidais nesta "idade"
+            current_age_lines = []
+            for line_t0 in helical_lines:
+                # Aplica rotação e translação
+                rotated_line = (rot_matrix @ line_t0.T).T
+                translated_line = rotated_line + axial_translation
+                current_age_lines.append(translated_line)
+            
+            wake_lines_by_age.append(current_age_lines)
+
+        # 4. Constrói as "peles" (DVEs) entre as "costelas"
+        for j in range(n_rows): # Para cada fileira de DVEs
+            new_wake_row = []
+            inboard_lines = wake_lines_by_age[j]
+            outboard_lines = wake_lines_by_age[j+1]
+
+            for blade_idx in range(rotor.num_blades): # Para cada pá
+                line_in = inboard_lines[blade_idx]
+                line_out = outboard_lines[blade_idx]
+
+                for i in range(len(line_in) - 1): # Para cada DVE ao longo da envergadura
+                    p1 = line_in[i]
+                    p2 = line_in[i+1]
+                    p3 = line_out[i+1]
+                    p4 = line_out[i]
+                    
+                    wake_dve = DVE(p1, p2, p3, p4)
+                    new_wake_row.append(wake_dve)
+            
+            self.rows.append(new_wake_row)
+        
+        print("Esteira inicial gerada com sucesso.")
+
+    def __generate_initial_semirelaxed_wake(self):
+        pass
+       
+    def __generate_initial_relaxed_wake(self):
+        pass
+
+    
+    
+    def get_all_dves(self):
+        """Retorna uma lista plana com todos os DVEs da esteira."""
+        all_dves = []
+        for row in self.rows:
+            all_dves.extend(row)
+        return all_dves
