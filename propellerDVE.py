@@ -1,3 +1,4 @@
+import copy
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
@@ -136,34 +137,7 @@ class PropellerGeometry:
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='3d')
 
-
-        X, Y, Z = [], [], []
-
-        for sec in self.sections:
-
-            # Escalar pela corda local
-            x_scaled = (sec.x - 0.25) * sec.chord  # referência em 1/4 da corda
-            if real_profile:
-                z_scaled = sec.z_real * sec.chord
-            else:
-                z_scaled = sec.z * sec.chord
-
-            # Aplicar torção
-            x_rot = x_scaled * np.cos(sec.twist) - z_scaled * np.sin(sec.twist)
-            z_rot = x_scaled * np.sin(sec.twist) + z_scaled * np.cos(sec.twist)
-
-            # Posicionar no raio atual
-            y_coords = np.full_like(x_rot, sec.r)
-
-            X.append(x_rot)
-            Y.append(y_coords)
-            Z.append(z_rot)
-
-        X = np.array(X)
-        Y = np.array(Y)
-        Z = np.array(Z)
-
-        ax.plot_surface(X, Y, Z, color='lightblue', edgecolor='gray', alpha=0.95, rstride=1, cstride=1)
+        ax = self.plot_blade(ax, real_profile)
 
         ax.set_xlabel("X (Chord)")
         ax.set_ylabel("Y (Span)")
@@ -173,12 +147,73 @@ class PropellerGeometry:
         plt.tight_layout()
         plt.show()
 
+    def plot_blade(self, ax, color='lightblue', edgecolor='gray', alpha=0.95, rstride=1, cstride=1):
+        """
+        Plota a superfície 3D desta pá, com base na geometria atual dos seus DVEs.
+        (Versão corrigida que funciona com a rotação do rotor)
+        """
+        if not hasattr(self, 'dves') or not self.dves:
+            print("Aviso: A pá ainda não foi discretizada em DVEs. Nada para plotar.")
+            return
+        
+        # --- ADICIONE ESTE BLOCO DE DEBUG ---
+        # Pega o primeiro DVE da pá como amostra para inspeção
+        dve_para_inspecionar = self.dves[0]
+        print("Coordenadas dos 4 cantos do primeiro DVE no momento do plot:")
+        print(f"  p1: {np.round(dve_para_inspecionar.p1, 3)}")
+        print(f"  p2: {np.round(dve_para_inspecionar.p2, 3)}")
+        print(f"  p3: {np.round(dve_para_inspecionar.p3, 3)}")
+        print(f"  p4: {np.round(dve_para_inspecionar.p4, 3)}")
+        # --- FIM DO BLOCO DE DEBUG ---
+
+        # Cria as matrizes (meshgrid) para as coordenadas da superfície
+        X = np.zeros((self.n_span, self.m_chord + 1))
+        Y = np.zeros((self.n_span, self.m_chord + 1))
+        Z = np.zeros((self.n_span, self.m_chord + 1))
+
+        # Preenche as primeiras (n_span - 1) linhas da malha de pontos
+        for j in range(self.n_span - 1):      # Itera sobre as fileiras de DVEs
+            for i in range(self.m_chord):  # Itera sobre os DVEs na fileira
+                dve_index = j * self.m_chord + i
+                dve = self.dves[dve_index]
+                
+                # A linha j da malha de pontos é formada pelos pontos p1 dos DVEs
+                X[j, i] = dve.p1[0]
+                Y[j, i] = dve.p1[1]
+                Z[j, i] = dve.p1[2]
+
+            # O último ponto da linha j é o ponto p2 do último DVE da fileira
+            last_dve_in_row = self.dves[(j + 1) * self.m_chord - 1]
+            X[j, self.m_chord] = last_dve_in_row.p2[0]
+            Y[j, self.m_chord] = last_dve_in_row.p2[1]
+            Z[j, self.m_chord] = last_dve_in_row.p2[2]
+
+        # Preenche a última linha de pontos da malha (a ponta da pá)
+        # Ela é formada pelos pontos p4 e p3 da última fileira de DVEs
+        last_row_start_index = (self.n_span - 2) * self.m_chord
+        for i in range(self.m_chord):
+            dve_index = last_row_start_index + i
+            dve = self.dves[dve_index]
+            X[self.n_span - 1, i] = dve.p4[0]
+            Y[self.n_span - 1, i] = dve.p4[1]
+            Z[self.n_span - 1, i] = dve.p4[2]
+            
+        last_dve_in_blade = self.dves[-1]
+        X[self.n_span - 1, self.m_chord] = last_dve_in_blade.p3[0]
+        Y[self.n_span - 1, self.m_chord] = last_dve_in_blade.p3[1]
+        Z[self.n_span - 1, self.m_chord] = last_dve_in_blade.p3[2]
+
+        # Agora, plota a superfície usando a malha reconstruída
+        ax.plot_surface(X, Y, Z, color=color, edgecolor=edgecolor, alpha=alpha, rstride=rstride, cstride=cstride)
+
     def discretize2DVE(self, m=5, n=10):
         """
         Discretiza a pá em DVEs, utilizando os perfis armazenados nas seções (pré-processados).
         m -> chordwise
         n -> spanwise
         """
+        self.n_span = n
+        self.m_chord = m
 
         r_vals = np.linspace(self.sections[0].r, self.sections[-1].r, n)
         profiles = []
@@ -922,6 +957,17 @@ class DVE:
 
         return total_force, total_moment
 
+    def recalculate_geometry(self):
+        """
+        Recalcula todos os atributos geométricos do DVE após seus pontos
+        de canto (p1, p2, p3, p4) terem sido movidos/rotacionados.
+        """
+        self.control_point = self.compute_control_point()
+        self.normal = self.compute_normal() # compute_normal já chama compute_local_frame
+        self.half_chord = self.compute_half_chord()
+        self.half_span = self.compute_half_span()
+        self.compute_sweep_angles()
+        
 class DVESolver:
     def __init__(self, dves, omega, rho, V_inf=np.array([1.0, 0.0, 0.0])):
         self.dves = dves
@@ -1084,3 +1130,95 @@ class DVESolver:
         self.solve()
         self.compute_performance()
 
+class Rotor:
+    def __init__(self, blade, num_blades):
+        self.num_blades = num_blades
+        self.blades = []
+
+        self.__create_blades(blade)
+
+    def __create_blades(self, blade):
+        azimuth_step = 2*np.pi/self.num_blades
+
+        for i in range(self.num_blades):
+            azimuth_angle = i * azimuth_step
+
+            new_blade = copy.deepcopy(blade)
+
+            print(f"\n--- Processando Pá {i+1} (Ângulo: {np.rad2deg(azimuth_angle):.1f}°) ---")
+        
+            # --- INSPECIONAR ANTES ---
+            # Pega o primeiro ponto do primeiro DVE como amostra
+            p1_antes = new_blade.dves[0].p1
+            #print(f"Coordenadas ANTES da rotação: {np.round(p1_antes, 3)}")
+            print(f"Coordenadas ANTES da rotação: p1 = {np.round(new_blade.dves[0].p1, 3)} | p2 = {np.round(new_blade.dves[0].p2, 3)}")
+
+            
+            # Gira a nova pá para sua posição inicial
+            self.__rotate_blade(new_blade, azimuth_angle)
+            
+            # --- INSPECIONAR DEPOIS ---
+            p1_depois = new_blade.dves[0].p1
+            #print(f"Coordenadas DEPOIS da rotação: {np.round(p1_depois, 3)}")
+            print(f"Coordenadas DEPOIS da rotação: p1 = {np.round(new_blade.dves[0].p1, 3)} | p2 = {np.round(new_blade.dves[0].p2, 3)}")
+            
+            self.blades.append(new_blade)
+
+    def __rotate_blade(self, blade, angle):
+        rot_matrix = np.array([
+            [1, 0, 0],
+            [0, np.cos(angle), -np.sin(angle)],
+            [0, np.sin(angle), np.cos(angle)]
+        ])
+
+        for dve in blade.dves:
+            dve.p1 = rot_matrix @ dve.p1
+            dve.p2 = rot_matrix @ dve.p2
+            dve.p3 = rot_matrix @ dve.p3
+            dve.p4 = rot_matrix @ dve.p4
+            
+            # Recalcula a geometria interna do DVE após a rotação
+            dve.recalculate_geometry()
+
+    def update_position(self, dt, omega):
+        """
+        Avança a posição angular do rotor em um passo de tempo.
+        
+        Args:
+            dt (float): Passo de tempo [s].
+            omega (float): Velocidade de rotação [rad/s] em torno do eixo X.
+        """
+        rotation_angle = omega * dt
+        
+        # Gira cada pá pelo ângulo do passo de tempo
+        for blade in self.blades:
+            self.__rotate_blade(blade, rotation_angle)
+
+    def get_all_dves(self):
+        """
+        Retorna uma lista plana com todos os DVEs de todas as pás.
+        Útil para o solver.
+        """
+        all_dves = []
+        for blade in self.blades:
+            all_dves.extend(blade.dves)
+        return all_dves
+    
+    def plot(self, real_profile = False):
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+
+        colors = ['skyblue', 'salmon', 'lightgreen', 'gold', 'plum', 'lightcoral']
+        for i, blade in enumerate(self.blades):
+            # ADICIONE ESTA LINHA PARA SABER QUAL PÁ ESTÁ SENDO PLOTADA
+            print(f"\n--- Preparando para plotar a Pá {i + 1} ---")
+            blade_color = colors[i % len(colors)]
+            blade.plot_blade(ax, color=blade_color)
+
+        ax.set_xlabel("X (Chord)")
+        ax.set_ylabel("Y (Span)")
+        ax.set_zlabel("Z")
+        ax.view_init(elev=25, azim=-120)
+        ax.set_title(f"Rotor Geometry with {self.num_blades} Blades")
+        plt.tight_layout()
+        plt.show()
