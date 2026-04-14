@@ -292,8 +292,8 @@ class PropellerGeometry:
             for i, c_frac in enumerate(chord_fractions):
                 # Coordenadas 2D não rotacionadas (placa plana no plano XY)
                 # O eixo de torção está no eixo Y
-                # A corda estende-se ao longo do eixo X negativo, a partir de x=0
-                x_unrotated = -c_frac * chord
+                # A corda estende-se ao longo do eixo X positivo, a partir de x=0
+                x_unrotated = c_frac * chord
                 y_unrotated = r
                 z_unrotated = 0.0
 
@@ -302,7 +302,7 @@ class PropellerGeometry:
                 # Rotação padrão: x' = x*cos - z*sin; z' = x*sin + z*cos
                 # Como z_unrotated=0, simplifica-se:
                 x_rotated = x_unrotated * np.cos(twist_rad)
-                z_rotated = x_unrotated * np.sin(twist_rad)
+                z_rotated = -x_unrotated * np.sin(twist_rad)
                 
                 grid_points[j, i, :] = [x_rotated, y_unrotated, z_rotated]
 
@@ -409,9 +409,9 @@ class PropellerGeometry:
 class DVE:
     def __init__(self, p1, p2, p3, p4):
         self.p1 = p1  # canto LE inboard
-        self.p2 = p2  # canto TE inboard
+        self.p2 = p2  # canto LE outboard
         self.p3 = p3  # canto TE outboard
-        self.p4 = p4  # canto LE outboard
+        self.p4 = p4  # canto TE inboard
 
         self.control_point = self.compute_control_point()
         self.normal = self.compute_normal()
@@ -422,10 +422,10 @@ class DVE:
     
     def compute_control_point(self):
         # Ponto médio LE
-        self.mid_le = 0.5*(self.p1 + self.p4)
+        self.mid_le = 0.5*(self.p1 + self.p2)
 
         # Ponto médio TE
-        self.mid_te = 0.5*(self.p2 + self.p3)
+        self.mid_te = 0.5*(self.p4 + self.p3)
 
         # Ponto de controle em 75%
         #return self.mid_le + 0.75*(self.mid_te - self.mid_le)
@@ -442,6 +442,25 @@ class DVE:
         """
         v1 = self.p2 - self.p1
         v2 = self.p4 - self.p1
+
+        mid_le = 0.5 * (self.p1 + self.p2)
+        mid_te = 0.5 * (self.p4 + self.p3)
+        v2 = mid_te-mid_le
+        v2 = v2 / np.linalg.norm(v2)
+
+        self.e_eta = v1 / np.linalg.norm(v1)
+        self.e_zeta = np.cross(v2, v1)
+        self.e_zeta /= np.linalg.norm(self.e_zeta)
+        self.e_xi = np.cross(self.e_eta, self.e_zeta)
+
+        self.local_axes = np.vstack((self.e_xi, self.e_eta, self.e_zeta))  # 3x3
+
+    def compute_local_frame_old(self):
+        """
+        Define e armazena os vetores ξ, η, ζ do painel.
+        """
+        v1 = self.p2 - self.p1
+        v2 = self.p4 - self.p1
         self.e_eta = v1 / np.linalg.norm(v1)
         self.e_zeta = np.cross(v2, v1)
         self.e_zeta /= np.linalg.norm(self.e_zeta)
@@ -453,7 +472,11 @@ class DVE:
         x_global = self.local_axes.T @ x_local + self.control_point
         return x_global
     
-    def global2local(self, x_global, frame='leading_edge'):
+    def global2local(self, x_global):
+        rel = x_global - self.control_point
+        return self.local_axes @ rel
+
+    def global2local_old(self, x_global, frame='leading_edge'):
         """
         Converte um ponto global para o sistema de coordenadas local do DVE.
         
@@ -498,8 +521,8 @@ class DVE:
             raise ValueError("local_axes devem ser definidos antes de calcular os sweep angles")
 
         # Vetores das arestas no sistema de coordenadas global
-        v_le_global = self.p4 - self.p1
-        v_te_global = self.p3 - self.p2
+        v_le_global = self.p1 - self.p2
+        v_te_global = self.p4 - self.p3
 
         # Projeta os vetores das arestas nos eixos locais xi e eta
         v_le_xi_comp = np.dot(v_le_global, self.e_xi)
@@ -514,7 +537,7 @@ class DVE:
         self.sweep_te = np.arctan2(v_te_xi_comp, v_te_eta_comp)
         
         # Opcional: Calcular o enflechamento da corda média
-        v_mc_global = 0.5 * (self.p3 + self.p4) - 0.5 * (self.p1 + self.p2)
+        v_mc_global = 0.5 * (self.p1 + self.p4) - 0.5 * (self.p3 + self.p2)
         v_mc_xi_comp = np.dot(v_mc_global, self.e_xi)
         v_mc_eta_comp = np.dot(v_mc_global, self.e_eta)
         self.sweep_mc = np.arctan2(v_mc_xi_comp, v_mc_eta_comp)
@@ -523,11 +546,11 @@ class DVE:
         """
         Calcula a meia-corda do DVE no centro da envergadura.
         """
-        # Ponto médio da borda de ataque (entre p1 e p4)
-        mid_le_point = 0.5 * (self.p1 + self.p4)
+        # Ponto médio da borda de ataque (entre p1 e p2)
+        mid_le_point = 0.5 * (self.p1 + self.p2)
         
-        # Ponto médio da borda de fuga (entre p2 e p3)
-        mid_te_point = 0.5 * (self.p2 + self.p3)
+        # Ponto médio da borda de fuga (entre p3 e p4)
+        mid_te_point = 0.5 * (self.p3 + self.p4)
         
         # Vetor da corda no centro da envergadura
         chord_vector = mid_te_point - mid_le_point
@@ -538,11 +561,11 @@ class DVE:
         """
         Calcula a meia-envergadura do DVE.
         """
-        # Ponto médio da aresta inboard (entre p1 e p2)
-        mid_inboard_point = 0.5 * (self.p1 + self.p2)
+        # Ponto médio da aresta inboard (entre p1 e p4)
+        mid_inboard_point = 0.5 * (self.p1 + self.p4)
 
-        # Ponto médio da aresta outboard (entre p4 e p3)
-        mid_outboard_point = 0.5 * (self.p4 + self.p3)
+        # Ponto médio da aresta outboard (entre p2 e p3)
+        mid_outboard_point = 0.5 * (self.p2 + self.p3)
 
         # Vetor da envergadura
         span_vector = mid_outboard_point - mid_inboard_point
@@ -627,7 +650,7 @@ class DVE:
         
         return vel
     
-    def get_induced_velocity_by_coeff(self, p, coeff_idx):
+    def get_induced_velocity_by_coeff_old(self, p, coeff_idx):
         """
         Calcula o vetor de velocidade de influência em um ponto 'p',
         assumindo que o coeficiente de circulação solicitado é 1 e os outros são 0.
@@ -641,10 +664,10 @@ class DVE:
         """
         # Velocidades induzidas pelas 4 arestas do DVE (vórtice em anel)
         # A direção segue a regra da mão direita para um vórtice positivo (para cima)
-        v_le = self._induced_velocity_by_filament(self.p1, self.p4, p) # Bordo de ataque
-        v_te = self._induced_velocity_by_filament(self.p3, self.p2, p) # Bordo de fuga
-        v_inboard = self._induced_velocity_by_filament(self.p2, self.p1, p) # Lado interno
-        v_outboard = self._induced_velocity_by_filament(self.p4, self.p3, p) # Lado externo
+        v_le = self._induced_velocity_by_filament(self.p1, self.p2, p) # Bordo de ataque
+        v_te = self._induced_velocity_by_filament(self.p3, self.p4, p) # Bordo de fuga
+        v_inboard = self._induced_velocity_by_filament(self.p4, self.p1, p) # Lado interno
+        v_outboard = self._induced_velocity_by_filament(self.p2, self.p3, p) # Lado externo
 
         if coeff_idx == 0:
             # Coeficiente A: Circulação constante Gamma = 1.
@@ -668,7 +691,130 @@ class DVE:
         else:
             raise ValueError("coeff_idx deve ser 0, 1 ou 2.")
     
-    def __compute_filament_velocity(self, point, gamma_coeffs, sweep_angle):
+    def get_induced_velocity_by_coeff_new(self, p, coeff_idx):
+        """
+        Calcula a velocidade induzida por um coeficiente unitário (A, B ou C),
+        incluindo:
+        1. Filamentos Bound (LE/TE)
+        2. Folha de Vorticidade (Sheet)
+        3. Filamentos Laterais (Trailing/Side Edges) -> CRUCIAL PARA FECHAR O ANEL
+        """
+        # --- Configuração Inicial ---
+        temp_coeffs = np.zeros(3)
+        temp_coeffs[coeff_idx] = 1.0
+
+        kse = 1e-5 
+        kse = 0.05 * self.half_span
+        kle = 1e-5 
+        kle = 0.05 * self.half_chord
+        if hasattr(self, 'half_chord'):
+             kle = 0.01 * (self.half_chord * 2)
+
+        # ======================================================================
+        # PARTE 1: Bound Vortex + Sheet (Calculados no Sistema LOCAL)
+        # ======================================================================
+        
+        # 1. Borda de Ataque (LE) -> Contribuição "Frontal"
+        coeffs_le = temp_coeffs
+        local_le = self.global2local(p, frame='leading_edge')
+        v_fil_le_loc = self.__compute_filament_velocity(local_le, coeffs_le, self.sweep_le)
+        v_sht_le_loc = self.__compute_sheet_velocity(local_le, coeffs_le, self.sweep_le, kse, kle)
+
+        # 2. Borda de Fuga (TE) -> Contribuição "Traseira" (Sinal Invertido)
+        coeffs_te = -temp_coeffs
+        local_te = self.global2local(p, frame='trailing_edge')
+        v_fil_te_loc = self.__compute_filament_velocity(local_te, coeffs_te, self.sweep_te)
+        v_sht_te_loc = self.__compute_sheet_velocity(local_te, coeffs_te, self.sweep_te, kse, kle)
+
+        # Soma e converte para GLOBAL
+        v_main_local = v_fil_le_loc + v_sht_le_loc + v_fil_te_loc + v_sht_te_loc
+        v_main_global = self.local2global_vector(v_main_local)
+
+        # ======================================================================
+        # PARTE 2: Filamentos Laterais (Calculados no Sistema GLOBAL)
+        # Necessários para fechar o circuito de vorticidade (especialmente Coeff A)
+        # ======================================================================
+        
+        # Determina a intensidade da circulação nas bordas (eta = +/- half_span)
+        eta_tip = self.half_span
+        eta_root = -self.half_span
+        
+        gamma_tip = 0.0
+        gamma_root = 0.0
+        
+        if coeff_idx == 0:   # A=1 (Constante)
+            gamma_tip = 1.0
+            gamma_root = 1.0
+        elif coeff_idx == 1: # B=eta (Linear)
+            gamma_tip = eta_tip
+            gamma_root = eta_root
+        elif coeff_idx == 2: # C=eta^2 (Quadrático)
+            gamma_tip = eta_tip**2
+            gamma_root = eta_root**2
+
+        # Topologia do Usuário: P1(LE In), P2(LE Out), P3(TE Out), P4(TE In)
+        
+        # Lateral Externa (Ponta): Conecta P2 -> P3
+        # Usa Biot-Savart simples (_induced_velocity_by_filament assume linha reta)
+        v_side_out = self._induced_velocity_by_filament(self.p2, self.p3, p) * gamma_tip
+        
+        # Lateral Interna (Raiz): Conecta P4 -> P1
+        # Fecha o anel voltando do TE para o LE
+        v_side_in = self._induced_velocity_by_filament(self.p4, self.p1, p) * gamma_root
+
+        # ======================================================================
+        # SOMA TOTAL
+        # ======================================================================
+        return v_main_global + v_side_out + v_side_in
+    
+    def get_induced_velocity_by_coeff(self, p, coeff_idx):
+        """
+        Calcula a velocidade induzida por um coeficiente unitário (A, B ou C),
+        incluindo:
+        1. Filamentos Bound (LE/TE)
+        2. Folha de Vorticidade (Sheet)
+
+        Args:
+            p (np.array): Ponto onde a velocidade é calculada.
+            coeff_idx (int): Índice do coeficiente (0 para A, 1 para B, 2 para C).
+
+        Returns:
+            np.array: Vetor de velocidade de influência.
+        """
+
+        # --- Configuração Inicial ---
+        temp_coeffs = np.zeros(3)
+        temp_coeffs[coeff_idx] = 1.0
+
+        kse = 1e-5 
+        kse = 0.05 * self.half_span
+        kle = 1e-5 
+        kle = 0.05 * self.half_chord
+        if hasattr(self, 'half_chord'):
+             kle = 0.01 * (self.half_chord * 2)
+
+        p_loc = self.global2local(p)
+
+        # 1. Borda de Ataque (LE) -> Contribuição "Frontal"
+        v_fil_le_loc = self.__compute_filament_velocity(p_loc, -self.half_chord, temp_coeffs, self.sweep_le)
+
+        # 2. Borda de Fuga (TE) -> Contribuição "Traseira" (Sinal Invertido)
+        v_fil_te_loc = self.__compute_filament_velocity(p_loc, self.half_chord, temp_coeffs, self.sweep_te)
+
+        # 2. Folha/Sheet -> Contribuição do DVE
+        coeffs_dve = temp_coeffs
+        if coeff_idx == 0:
+            v_sheet_cp_loc = np.zeros(3)
+        else:
+            v_sheet_cp_loc = self.__compute_sheet_velocity(p_loc, temp_coeffs, self.sweep_te, kse, kle)
+
+        v_local = v_fil_le_loc + v_fil_te_loc + v_sheet_cp_loc
+
+        v_global = self.local2global(v_local)
+
+        return v_global
+
+    def __compute_filament_velocity(self, point, xi_filament, gamma_coeffs, sweep_angle):
         """
         Calcula a velocidade induzida por um único filamento de vórtice.
 
@@ -678,7 +824,8 @@ class DVE:
             sweep_angle (float): Ângulo de enflechamento (Lambda) do filamento em radianos.
         """
         A, B, C = gamma_coeffs
-        xi, eta, zeta = point
+        xi_p, eta, zeta = point
+        xi = xi_p - xi_filament
 
         tan_lambda = np.tan(sweep_angle)
 
@@ -754,6 +901,7 @@ class DVE:
         c22 = -2*zeta**2*(xi - 2*eta*tan_lambda)
         c23 = 2*tan_lambda
         c24 = 2*(xi - 2*eta*tan_lambda)
+
         c25 = -2*eta
         c26 = -2*zeta**2
         c27 = 2
@@ -1068,8 +1216,8 @@ class DVE:
 
         # Contribuição de ambos os filamentos (LE e TE)
         filaments = [
-            {'origin': self.mid_le, 'edge_vector': self.p4 - self.p1, 'coeffs': self.gamma_coeffs},
-            {'origin': self.mid_te, 'edge_vector': self.p3 - self.p2, 'coeffs': -self.gamma_coeffs}
+            {'origin': self.mid_le, 'edge_vector': self.p2 - self.p1, 'coeffs': self.gamma_coeffs},
+            {'origin': self.mid_te, 'edge_vector': self.p4 - self.p3, 'coeffs': -self.gamma_coeffs}
         ]
 
         for filament in filaments:
@@ -1194,13 +1342,13 @@ class DVESolver:
 
             for j, dve_j in enumerate(self.blade_dves):
                 vel_A = dve_j.get_induced_velocity_by_coeff(dve_i.control_point, coeff_idx=0)
-                self.D[i, 3*j + 0] = np.dot(-vel_A, dve_i.normal)
+                self.D[i, 3*j + 0] = np.dot(vel_A, dve_i.normal)
                 
                 vel_B = dve_j.get_induced_velocity_by_coeff(dve_i.control_point, coeff_idx=1)
-                self.D[i, 3*j + 1] = np.dot(-vel_B, dve_i.normal)
+                self.D[i, 3*j + 1] = np.dot(vel_B, dve_i.normal)
                 
                 vel_C = dve_j.get_induced_velocity_by_coeff(dve_i.control_point, coeff_idx=2)
-                self.D[i, 3*j + 2] = np.dot(-vel_C, dve_i.normal)
+                self.D[i, 3*j + 2] = np.dot(vel_C, dve_i.normal)
         
         # --- Parte 2: Condições de Contorno ---
         row_index = self.n_dves_total
@@ -1266,6 +1414,8 @@ class DVESolver:
     def solve(self):
         try:
             self.gamma = np.linalg.solve(self.D, self.R)
+            self.rotor.update_gamma_in_dves(self.gamma) # Se você tiver esse método para distribuir o vetor X nos objetos DVE
+            self.wake.update_circulation(self.rotor) # Nova função para transferir Gamma para a esteira
             for i, dve in enumerate(self.blade_dves):
                 dve.gamma_coeffs = self.gamma[i*3:(i+1)*3]
             print("Sistema resolvido com sucesso. Coeficientes de circulação atualizados.")
@@ -1285,7 +1435,7 @@ class DVESolver:
         rotor_total_torque = np.zeros(3)
         
         # 1. Coleta todos os DVEs que induzem velocidade (pás e esteira)
-        all_inducing_dves = self.rotor.get_all_dves()
+        all_inducing_dves = self.rotor.get_all_dves() + self.wake.get_all_dves()
         # No futuro, adicione os DVEs da esteira:
         # all_inducing_dves.extend(self.wake.get_all_dves())
 
@@ -1404,6 +1554,32 @@ class Rotor:
         for blade in self.blades:
             self.__rotate_blade(blade, rotation_angle)
 
+    def update_gamma_in_dves(self, gamma_solution):
+        """
+        Distribui os coeficientes de circulação calculados pelo solver 
+        para os objetos DVE individuais das pás.
+
+        Args:
+            gamma_solution (np.array): Vetor 1D contendo a solução do sistema linear
+                                       Formato: [A0, B0, C0, A1, B1, C1, ...]
+        """
+        # Garante que temos a lista plana de todos os DVEs na mesma ordem da montagem da matriz
+        all_dves = self.get_all_dves()
+        
+        # Verificação de segurança
+        if len(gamma_solution) != 3 * len(all_dves):
+            raise ValueError(f"Dimensão do vetor gamma ({len(gamma_solution)}) incompatível com o número de DVEs ({len(all_dves)}).")
+
+        # Itera e distribui
+        for i, dve in enumerate(all_dves):
+            # Pega a fatia de 3 coeficientes correspondente a este DVE
+            start_idx = i * 3
+            end_idx = start_idx + 3
+            coeffs = gamma_solution[start_idx:end_idx]
+            
+            # Atualiza o objeto DVE
+            dve.gamma_coeffs = coeffs
+
     def get_all_dves(self):
         """
         Retorna uma lista plana com todos os DVEs de todas as pás.
@@ -1489,15 +1665,15 @@ class Wake:
         te_dves_t0 = rotor.get_trailing_edge_dves()
         
         # Extrai os nós (pontos de canto) da borda de fuga.
-        # Para uma pá, teremos uma linha de nós (p2, p3)
+        # Para uma pá, teremos uma linha de nós (p3, p4)
         # Precisamos organizar isso por pá.
         
         helical_lines = []
         for blade in rotor.blades:
             te_nodes_blade = []
             te_dves_blade = blade.get_trailing_edge_dves()
-            # Adiciona o primeiro ponto (p2 do primeiro DVE da TE)
-            te_nodes_blade.append(te_dves_blade[0].p2)
+            # Pega o P4 (TE Inboard) do primeiro painel (raiz)
+            te_nodes_blade.append(te_dves_blade[0].p4)
             # Adiciona os pontos p3 de todos os DVEs da TE
             for dve in te_dves_blade:
                 te_nodes_blade.append(dve.p3)
@@ -1508,7 +1684,7 @@ class Wake:
         
         for k in range(1, n_rows + 1): # Para cada passo de tempo no passado
             age = k * dt
-            rotation_angle = omega * age
+            rotation_angle = -omega * age
             axial_translation = np.array([V_eff * age, 0, 0])
 
             rot_matrix = np.array([
@@ -1557,7 +1733,42 @@ class Wake:
     def __generate_initial_relaxed_wake(self):
         pass
 
-    
+    def update_circulation(self, rotor):
+        """
+        Atualiza a circulação dos DVEs da esteira com base na solução atual do rotor.
+        Para esteira fixa, Gamma_wake = Gamma_TE_Blade.
+        """
+        # Itera sobre as pás e suas respectivas "fatias" de esteira
+        dve_count = 0
+        
+        # Estrutura da lista self.rows: [Row0_AllBlades, Row1_AllBlades, ...]
+        # Precisamos mapear qual DVE da esteira corresponde a qual DVE da pá.
+        
+        # Assumindo que a ordem de criação foi preservada:
+        # Dentro de cada row, temos: [Blade1_Span1...SpanN, Blade2_Span1...SpanN, ...]
+        
+        for b_idx, blade in enumerate(rotor.blades):
+            te_dves = blade.get_trailing_edge_dves()
+            n_span = len(te_dves)
+            
+            # Para cada painel ao longo da envergadura da pá
+            for s_idx in range(n_span):
+                # Pega a circulação no Bordo de Fuga da pá
+                # Gamma é constante ao longo do painel da esteira (apenas Coef A)
+                # Aproximação: Usar o Gamma médio do painel ou o valor no meio
+                blade_gamma = te_dves[s_idx].gamma_coeffs[0] # Pegando termo A (constante)
+                # Ou calcular Gamma total no meio do painel: A + B*0 + C*0 = A
+                
+                # Atualiza todas as fileiras da esteira para esta posição de envergadura
+                for row in self.rows:
+                    # O índice do DVE na lista 'row' correspondente à pá 'b_idx' e posição 's_idx'
+                    wake_dve_index = (b_idx * n_span) + s_idx
+                    
+                    wake_dve = row[wake_dve_index]
+                    
+                    # Na esteira, modelamos como um filamento vorticoso constante (vortex ring)
+                    # Portanto, setamos A = Gamma, B=0, C=0.
+                    wake_dve.gamma_coeffs = [blade_gamma, 0.0, 0.0]
     
     def get_all_dves(self):
         """Retorna uma lista plana com todos os DVEs da esteira."""
